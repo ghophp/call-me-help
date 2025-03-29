@@ -5,7 +5,6 @@ import (
 
 	"github.com/ghophp/call-me-help/config"
 	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
 )
 
 // GeminiService handles generation of AI responses using Google's Gemini
@@ -19,7 +18,8 @@ type GeminiService struct {
 func NewGeminiService(ctx context.Context) (*GeminiService, error) {
 	cfg := config.Load()
 
-	client, err := genai.NewClient(ctx, option.WithAPIKey(cfg.GeminiAPIKey))
+	// Create client using the default credentials from GOOGLE_APPLICATION_CREDENTIALS
+	client, err := genai.NewClient(ctx)
 	if err != nil {
 		return nil, err
 	}

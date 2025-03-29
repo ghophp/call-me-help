@@ -15,9 +15,6 @@ type Config struct {
 	GoogleProjectID       string
 	GoogleCredentialsPath string
 
-	// Gemini API
-	GeminiAPIKey string
-
 	// Server Configuration
 	Port string
 }
@@ -35,7 +32,6 @@ func Load() *Config {
 		TwilioPhoneNumber:     os.Getenv("TWILIO_PHONE_NUMBER"),
 		GoogleProjectID:       os.Getenv("GOOGLE_PROJECT_ID"),
 		GoogleCredentialsPath: os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
-		GeminiAPIKey:          os.Getenv("GEMINI_API_KEY"),
 		Port:                  port,
 	}
 }

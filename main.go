@@ -16,6 +16,10 @@ import (
 )
 
 func main() {
+	// Set up logging with file and line number
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	log.Println("Starting Call-Me-Help application...")
+
 	// Load environment variables
 	err := godotenv.Load()
 	if err != nil {
@@ -26,22 +30,27 @@ func main() {
 	port := flag.String("port", "8080", "server port")
 	flag.Parse()
 
+	log.Println("Initializing services...")
+
 	// Initialize services
 	ctx := context.Background()
 
 	// Initialize Google Cloud clients
+	log.Println("Initializing Speech-to-Text service...")
 	speechClient, err := services.NewSpeechToTextService(ctx)
 	if err != nil {
 		log.Fatalf("Failed to create Speech-to-Text client: %v", err)
 	}
 	defer speechClient.Close()
 
+	log.Println("Initializing Text-to-Speech service...")
 	ttsClient, err := services.NewTextToSpeechService(ctx)
 	if err != nil {
 		log.Fatalf("Failed to create Text-to-Speech client: %v", err)
 	}
 	defer ttsClient.Close()
 
+	log.Println("Initializing Gemini service...")
 	geminiClient, err := services.NewGeminiService(ctx)
 	if err != nil {
 		log.Fatalf("Failed to create Gemini client: %v", err)
@@ -49,15 +58,19 @@ func main() {
 	defer geminiClient.Close()
 
 	// Initialize conversation service for context management
+	log.Println("Initializing Conversation service...")
 	conversationService := services.NewConversationService()
 
 	// Initialize channel manager
+	log.Println("Initializing Channel Manager...")
 	channelManager := services.NewChannelManager()
 
 	// Initialize Twilio client
+	log.Println("Initializing Twilio service...")
 	twilioClient := services.NewTwilioService()
 
 	// Create service container
+	log.Println("Creating service container...")
 	serviceContainer := &services.ServiceContainer{
 		SpeechToText:   speechClient,
 		TextToSpeech:   ttsClient,
@@ -68,6 +81,7 @@ func main() {
 	}
 
 	// Setup HTTP handlers
+	log.Println("Setting up HTTP handlers...")
 	mux := http.NewServeMux()
 
 	// Twilio webhook endpoints
