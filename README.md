@@ -118,6 +118,44 @@ The application can be deployed to any platform that supports Go applications, s
 - Heroku
 - Digital Ocean
 
+## Logging Levels
+
+The application supports the following log levels:
+- `DEBUG`: Verbose output for debugging purposes
+- `INFO`: General operational information (default)
+- `WARN`: Warning messages
+- `ERROR`: Error conditions
+
+You can set the log level using the `LOG_LEVEL` environment variable:
+
+```bash
+LOG_LEVEL=DEBUG go run main.go
+```
+
+## Testing
+
+### Unit Tests
+
+Run the unit tests with:
+
+```bash
+make test
+```
+
+### Integration Tests
+
+Integration tests require proper configuration of external services (Google Cloud, etc.). Run them with:
+
+```bash
+make test-integration
+```
+
+Or manually:
+
+```bash
+INTEGRATION_TESTS=true go test -v ./services/...
+```
+
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.

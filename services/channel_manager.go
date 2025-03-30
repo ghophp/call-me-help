@@ -3,11 +3,11 @@ package services
 import (
 	"context"
 	"errors"
-	"log"
 	"sync"
 	"time"
 
 	"cloud.google.com/go/speech/apiv1/speechpb"
+	"github.com/ghophp/call-me-help/logger"
 )
 
 // ChannelData holds the channels for a specific call
@@ -26,13 +26,16 @@ type ChannelData struct {
 type ChannelManager struct {
 	channels map[string]*ChannelData
 	mu       sync.Mutex
+	log      *logger.Logger
 }
 
 // NewChannelManager creates a new channel manager
 func NewChannelManager() *ChannelManager {
-	log.Printf("Creating new ChannelManager")
+	log := logger.Component("ChannelManager")
+	log.Info("Creating new ChannelManager")
 	return &ChannelManager{
 		channels: make(map[string]*ChannelData),
+		log:      log,
 	}
 }
 
@@ -41,7 +44,7 @@ func (cm *ChannelManager) CreateChannels(callSID string) *ChannelData {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	log.Printf("Creating channels for call %s", callSID)
+	cm.log.Info("Creating channels for call %s", callSID)
 	channels := &ChannelData{
 		CallSID:           callSID,
 		CreatedAt:         time.Now(),
@@ -52,7 +55,7 @@ func (cm *ChannelManager) CreateChannels(callSID string) *ChannelData {
 	}
 
 	cm.channels[callSID] = channels
-	log.Printf("Created channels for call %s", callSID)
+	cm.log.Info("Created channels for call %s", callSID)
 	return channels
 }
 
@@ -63,9 +66,9 @@ func (cm *ChannelManager) GetChannels(callSID string) (*ChannelData, bool) {
 
 	channels, ok := cm.channels[callSID]
 	if !ok {
-		log.Printf("Channels not found for call %s", callSID)
+		cm.log.Warn("Channels not found for call %s", callSID)
 	} else {
-		log.Printf("Retrieved channels for call %s", callSID)
+		cm.log.Debug("Retrieved channels for call %s", callSID)
 	}
 	return channels, ok
 }
@@ -75,9 +78,9 @@ func (cm *ChannelManager) RemoveChannels(callSID string) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	log.Printf("Removing channels for call %s", callSID)
+	cm.log.Info("Removing channels for call %s", callSID)
 	delete(cm.channels, callSID)
-	log.Printf("Removed channels for call %s", callSID)
+	cm.log.Info("Removed channels for call %s", callSID)
 }
 
 // GetMostRecentCallSID returns the SID of the most recently created call
@@ -96,9 +99,9 @@ func (cm *ChannelManager) GetMostRecentCallSID() string {
 	}
 
 	if mostRecentSID != "" {
-		log.Printf("Found most recent call SID: %s", mostRecentSID)
+		cm.log.Info("Found most recent call SID: %s", mostRecentSID)
 	} else {
-		log.Printf("No active calls found")
+		cm.log.Warn("No active calls found")
 	}
 
 	return mostRecentSID
@@ -106,62 +109,62 @@ func (cm *ChannelManager) GetMostRecentCallSID() string {
 
 // StartAudioProcessing starts processing audio through speech-to-text
 func (cm *ChannelManager) StartAudioProcessing(ctx context.Context, callSID string, stt *SpeechToTextService) (speechpb.Speech_StreamingRecognizeClient, error) {
-	log.Printf("Starting audio processing for call %s", callSID)
+	cm.log.Info("Starting audio processing for call %s", callSID)
 	channels, ok := cm.GetChannels(callSID)
 	if !ok {
-		log.Printf("No channels found for call %s, cannot start audio processing", callSID)
+		cm.log.Error("No channels found for call %s, cannot start audio processing", callSID)
 		return nil, errors.New("no channels found for call")
 	}
 
 	// Set processing flag to avoid multiple processors for same call
 	channels.processingAudioMutex.Lock()
 	if channels.isProcessingAudio {
-		log.Printf("Audio processing already in progress for call %s", callSID)
+		cm.log.Warn("Audio processing already in progress for call %s", callSID)
 		channels.processingAudioMutex.Unlock()
 		return nil, errors.New("audio processing already in progress")
 	}
 	channels.isProcessingAudio = true
 	channels.processingAudioMutex.Unlock()
-	log.Printf("Audio processing flag set for call %s", callSID)
+	cm.log.Debug("Audio processing flag set for call %s", callSID)
 
 	// Create a pipe for streaming the audio data
-	log.Printf("Creating pipe for audio streaming for call %s", callSID)
+	cm.log.Debug("Creating pipe for audio streaming for call %s", callSID)
 
 	// Start streaming recognition
-	log.Printf("Initiating Speech-to-Text streaming for call %s", callSID)
+	cm.log.Info("Initiating Speech-to-Text streaming for call %s", callSID)
 	transcriptionChan, stream, err := stt.StreamingRecognize(ctx)
 	if err != nil {
-		log.Printf("Error starting streaming recognition for call %s: %v", callSID, err)
+		cm.log.Error("Error starting streaming recognition for call %s: %v", callSID, err)
 		return nil, err
 	}
-	log.Printf("Speech-to-Text streaming started for call %s", callSID)
+	cm.log.Info("Speech-to-Text streaming started for call %s", callSID)
 
 	// Forward transcriptions to the transcription channel
 	go func() {
-		log.Printf("Starting transcription forwarding goroutine for call %s", callSID)
-		defer log.Printf("Transcription forwarding goroutine ended for call %s", callSID)
+		cm.log.Debug("Starting transcription forwarding goroutine for call %s", callSID)
+		defer cm.log.Debug("Transcription forwarding goroutine ended for call %s", callSID)
 
 		transcriptionCount := 0
 		for transcription := range transcriptionChan {
 			transcriptionCount++
-			log.Printf("Received transcription #%d from Google STT for call %s: %s",
+			cm.log.Debug("Received transcription #%d from Google STT for call %s: %s",
 				transcriptionCount, callSID, transcription)
 
 			select {
 			case channels.TranscriptionChan <- transcription:
-				log.Printf("Forwarded transcription #%d to channel for call %s",
+				cm.log.Debug("Forwarded transcription #%d to channel for call %s",
 					transcriptionCount, callSID)
 			default:
-				log.Printf("WARNING: TranscriptionChan full for call %s, dropping transcription: %s",
+				cm.log.Warn("TranscriptionChan full for call %s, dropping transcription: %s",
 					callSID, transcription)
 			}
 		}
 
-		log.Printf("Transcription channel closed after %d transcriptions for call %s",
+		cm.log.Info("Transcription channel closed after %d transcriptions for call %s",
 			transcriptionCount, callSID)
 	}()
 
-	log.Printf("Audio processing successfully started for call %s", callSID)
+	cm.log.Info("Audio processing successfully started for call %s", callSID)
 	return stream, nil
 }
 
@@ -172,12 +175,12 @@ func (cd *ChannelData) AppendAudioData(data []byte) {
 
 	// Skip empty data
 	if len(data) == 0 {
-		log.Printf("Skipping empty audio data for call %s", cd.CallSID)
+		logger.Debug("Skipping empty audio data for call %s", cd.CallSID)
 		return
 	}
 
 	// Add data to the audio buffer
-	log.Printf("Appending %d bytes of audio data for call %s", len(data), cd.CallSID)
+	logger.Debug("Appending %d bytes of audio data for call %s", len(data), cd.CallSID)
 
 	// Write to buffer
 	cd.AudioInputChan <- data

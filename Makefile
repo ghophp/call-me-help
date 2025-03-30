@@ -1,4 +1,4 @@
-.PHONY: build run test clean
+.PHONY: build run test clean test-integration
 
 # Go parameters
 GOCMD=go
@@ -32,4 +32,8 @@ deps:
 
 # Cross compilation
 build-linux:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GOBUILD) -o $(BINARY_UNIX) -v 
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GOBUILD) -o $(BINARY_UNIX) -v
+
+# Integration tests
+test-integration:
+	INTEGRATION_TESTS=true go test -v ./services/... 
