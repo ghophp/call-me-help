@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
@@ -19,6 +21,56 @@ var upgrader = websocket.Upgrader{
 		log.Printf("WebSocket origin check: %s", r.Header.Get("Origin"))
 		return true
 	},
+}
+
+// TwilioWSEvent represents a WebSocket event from Twilio
+type TwilioWSEvent struct {
+	Event          string       `json:"event"`
+	SequenceNumber string       `json:"sequenceNumber"`
+	StreamSid      string       `json:"streamSid"`
+	Media          *TwilioMedia `json:"media,omitempty"`
+	Stop           *TwilioStop  `json:"stop,omitempty"`
+}
+
+// TwilioMedia represents media data in a Twilio WebSocket event
+type TwilioMedia struct {
+	Track     string `json:"track"`
+	Chunk     string `json:"chunk"`
+	Timestamp string `json:"timestamp"`
+	Payload   string `json:"payload"` // Base64 encoded audio data
+}
+
+// TwilioStop represents the stop event data
+type TwilioStop struct {
+	AccountSid string `json:"accountSid"`
+	CallSid    string `json:"callSid"`
+}
+
+// checkAudioFormat performs basic validation on audio data
+func checkAudioFormat(data []byte) {
+	// Log the first few bytes to help debug format issues
+	if len(data) > 16 {
+		log.Printf("Audio header bytes: [% x]", data[:16])
+	} else if len(data) > 0 {
+		log.Printf("Audio bytes (too short): [% x]", data)
+	} else {
+		log.Printf("Warning: Empty audio data")
+	}
+
+	// Check for silence/empty audio
+	if len(data) > 0 {
+		allSame := true
+		firstByte := data[0]
+		for _, b := range data {
+			if b != firstByte {
+				allSame = false
+				break
+			}
+		}
+		if allSame {
+			log.Printf("Warning: Audio data appears to be silence or constant value: %02x", firstByte)
+		}
+	}
 }
 
 // HandleWebSocket handles WebSocket connections for streaming audio
@@ -134,9 +186,9 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 		log.Printf("Starting audio response sender for call %s", callSID)
 		go sendAudioResponses(conn, channels)
 
-		// Keep the connection alive and process binary audio data
+		// Keep the connection alive and process messages
 		for {
-			// Read messages (audio data or control messages)
+			// Read messages (might be JSON from Twilio)
 			messageType, data, err := conn.ReadMessage()
 			if err != nil {
 				log.Printf("WebSocket read error: %v", err)
@@ -146,13 +198,53 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 			// Handle different message types
 			switch messageType {
 			case websocket.BinaryMessage:
-				// Process binary audio data
+				// Process binary audio data directly
 				log.Printf("Received binary data: %d bytes", len(data))
+				checkAudioFormat(data)
 				channels.AppendAudioData(data)
 
 			case websocket.TextMessage:
-				// Log text messages for debugging
+				// Parse text message as JSON
 				log.Printf("Received text message: %s", string(data))
+
+				var event TwilioWSEvent
+				if err := json.Unmarshal(data, &event); err != nil {
+					log.Printf("Error parsing JSON message: %v", err)
+					continue
+				}
+
+				// Handle different event types
+				switch event.Event {
+				case "media":
+					if event.Media == nil {
+						log.Printf("Media event with no media data")
+						continue
+					}
+
+					// Decode base64 payload
+					mediaData, err := base64.StdEncoding.DecodeString(event.Media.Payload)
+					if err != nil {
+						log.Printf("Error decoding base64 payload: %v", err)
+						continue
+					}
+
+					log.Printf("Decoded %d bytes of audio from media event", len(mediaData))
+					checkAudioFormat(mediaData)
+					channels.AppendAudioData(mediaData)
+
+				case "start":
+					log.Printf("Stream started: %s", event.StreamSid)
+
+				case "stop":
+					log.Printf("Stream stopped: %s", event.StreamSid)
+					if event.Stop != nil {
+						log.Printf("Call ended: %s", event.Stop.CallSid)
+					}
+					// Don't break the loop here, let the WebSocket close naturally
+
+				default:
+					log.Printf("Unknown event type: %s", event.Event)
+				}
 
 			case websocket.PingMessage:
 				// Respond to pings with pongs
@@ -197,51 +289,95 @@ func processTranscriptionsAndResponses(
 ) {
 	log.Printf("Transcription processor started for call %s", channels.CallSID)
 
+	// Add a ticker to periodically check if we're receiving transcriptions
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	lastActivity := time.Now()
+
 	for {
 		select {
 		case <-ctx.Done():
 			log.Printf("Transcription processor context done for call %s", channels.CallSID)
 			return
+		case <-ticker.C:
+			idleTime := time.Since(lastActivity)
+			log.Printf("Transcription processor idle for %v for call %s", idleTime, channels.CallSID)
+
+			// Check channel buffer status to help diagnose issues
+			log.Printf("Channel status for call %s: TranscriptionChan buffer has %d items, ResponseTextChan has %d items, ResponseAudioChan has %d items",
+				channels.CallSID,
+				len(channels.TranscriptionChan),
+				len(channels.ResponseTextChan),
+				len(channels.ResponseAudioChan))
 		case transcription := <-channels.TranscriptionChan:
+			lastActivity = time.Now()
+
 			if transcription == "" {
+				log.Printf("Empty transcription received for call %s, ignoring", channels.CallSID)
 				continue
 			}
 
-			log.Printf("Transcription received: %s", transcription)
+			log.Printf("Transcription received for call %s: %q", channels.CallSID, transcription)
 
 			// Add user message to conversation
 			conversation.AddUserMessage(transcription)
+			log.Printf("Added user message to conversation for call %s", channels.CallSID)
 
 			// Get conversation history
 			history := conversation.GetFormattedHistory()
+			historyLength := len(history)
+			log.Printf("Retrieved conversation history for call %s, %d messages", channels.CallSID, historyLength)
 
 			// Generate AI response using Gemini
-			log.Printf("Generating AI response for: %s", transcription)
+			log.Printf("Generating AI response for call %s with transcription: %q", channels.CallSID, transcription)
+			startTime := time.Now()
 			response, err := svc.Gemini.GenerateResponse(ctx, transcription, history)
+			elapsed := time.Since(startTime)
+
 			if err != nil {
-				log.Printf("Error generating response: %v", err)
-				continue
+				log.Printf("Error generating response for call %s: %v (after %v)", channels.CallSID, err, elapsed)
+				// Send a fallback response in case of error
+				response = "I'm sorry, I'm having trouble understanding right now. Could you please repeat that?"
+			} else {
+				log.Printf("AI response generated for call %s in %v: %q", channels.CallSID, elapsed, response)
 			}
 
 			// Add AI response to conversation
 			conversation.AddTherapistMessage(response)
-			log.Printf("AI response generated: %s", response)
+			log.Printf("Added therapist response to conversation for call %s", channels.CallSID)
 
 			// Send the response text to the channel
-			channels.ResponseTextChan <- response
+			log.Printf("Sending text response to channel for call %s", channels.CallSID)
+			select {
+			case channels.ResponseTextChan <- response:
+				log.Printf("Text response sent to channel for call %s", channels.CallSID)
+			default:
+				log.Printf("WARNING: ResponseTextChan is full for call %s, dropping message", channels.CallSID)
+			}
 
 			// Convert response to speech
-			log.Printf("Converting response to speech: %s", response)
+			log.Printf("Converting response to speech for call %s: %q", channels.CallSID, response)
+			startTime = time.Now()
 			audioData, err := svc.TextToSpeech.SynthesizeSpeech(ctx, response)
+			elapsed = time.Since(startTime)
+
 			if err != nil {
-				log.Printf("Error synthesizing speech: %v", err)
+				log.Printf("Error synthesizing speech for call %s: %v (after %v)", channels.CallSID, err, elapsed)
 				continue
 			}
 
-			log.Printf("Text-to-speech conversion completed, %d bytes", len(audioData))
+			log.Printf("Text-to-speech conversion completed for call %s in %v, %d bytes",
+				channels.CallSID, elapsed, len(audioData))
 
 			// Send the audio to the channel
-			channels.ResponseAudioChan <- audioData
+			log.Printf("Sending audio response to channel for call %s", channels.CallSID)
+			select {
+			case channels.ResponseAudioChan <- audioData:
+				log.Printf("Audio response sent to channel for call %s", channels.CallSID)
+			default:
+				log.Printf("WARNING: ResponseAudioChan is full for call %s, dropping audio", channels.CallSID)
+			}
 		}
 	}
 }

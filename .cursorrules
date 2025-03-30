@@ -27,3 +27,5 @@ Offer suggestions for testing the API endpoints using Go's testing package.
 Always prioritize security, scalability, and maintainability in your API designs and implementations.
 
 Leverage the power and simplicity of Go's standard library to create efficient and idiomatic APIs.
+
+Do not generate a test/echo neither a /debug endpoint.

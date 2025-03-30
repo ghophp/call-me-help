@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log"
@@ -16,11 +17,10 @@ type TwilioStreamEvent struct {
 	StreamSid   string `json:"streamSid"`
 	CallSid     string `json:"callSid"`
 	AccountSid  string `json:"accountSid"`
-	MediaChunk  string `json:"media"`
+	MediaChunk  string `json:"media"` // Base64 encoded audio payload
 	SequenceNum int    `json:"sequenceNumber"`
 	Start       bool   `json:"start"`
 	End         bool   `json:"end"`
-	Payload     []byte `json:"-"`
 }
 
 // HandleIncomingCall handles an incoming call webhook from Twilio
@@ -126,15 +126,36 @@ func HandleTwilioStream(svc *services.ServiceContainer) http.HandlerFunc {
 				return
 			}
 
-			// Decode base64 data
-			if err := json.Unmarshal([]byte(event.MediaChunk), &event.Payload); err != nil {
+			// Decode base64 data directly
+			payload, err := base64.StdEncoding.DecodeString(event.MediaChunk)
+			if err != nil {
 				log.Printf("Error decoding media: %v", err)
 				http.Error(w, "Error decoding media", http.StatusBadRequest)
 				return
 			}
 
+			log.Printf("Decoded %d bytes of audio data from media chunk", len(payload))
+			// Check audio format for debugging
+			if len(payload) > 16 {
+				log.Printf("Audio header bytes: [% x]", payload[:16])
+			}
+			// Check for silence
+			if len(payload) > 0 {
+				allSame := true
+				firstByte := payload[0]
+				for _, b := range payload {
+					if b != firstByte {
+						allSame = false
+						break
+					}
+				}
+				if allSame {
+					log.Printf("Warning: Audio data appears to be silence or constant value: %02x", firstByte)
+				}
+			}
+
 			// Add audio data to buffer
-			channels.AppendAudioData(event.Payload)
+			channels.AppendAudioData(payload)
 			w.WriteHeader(http.StatusOK)
 
 		case "stop":

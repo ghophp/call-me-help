@@ -32,8 +32,8 @@ The application follows a modular architecture:
 - Google Cloud account with:
   - Speech-to-Text API enabled
   - Text-to-Speech API enabled
-  - Vertex AI/Gemini API enabled
   - Service account with appropriate permissions
+- Gemini API key (can be obtained from Google AI Studio)
 
 ## Google Cloud Setup
 
@@ -41,12 +41,16 @@ The application follows a modular architecture:
 2. Enable the following APIs:
    - Speech-to-Text API
    - Text-to-Speech API
-   - Vertex AI/Gemini API
 3. Create a service account with the following permissions:
    - Speech-to-Text User (`roles/speech.client`)
    - Text-to-Speech User (`roles/texttospeech.user`) 
-   - Vertex AI User (`roles/aiplatform.user`)
 4. Download the service account key as a JSON file
+
+## Gemini API Setup
+
+1. Go to [Google AI Studio](https://makersuite.google.com/app/apikey)
+2. Create a new API key 
+3. Add this API key to your environment variables as `GEMINI_API_KEY`
 
 ## Setup
 
@@ -67,10 +71,14 @@ The application follows a modular architecture:
    TWILIO_ACCOUNT_SID=your_twilio_account_sid
    TWILIO_AUTH_TOKEN=your_twilio_auth_token
    TWILIO_PHONE_NUMBER=your_twilio_phone_number
+   TWILIO_APP_SID=your_twilio_app_sid  # Optional: Only needed if using TwiML apps
 
    # Google Cloud Credentials
    GOOGLE_APPLICATION_CREDENTIALS=path/to/your/service-account-key.json
    GOOGLE_PROJECT_ID=your_google_project_id
+
+   # Gemini API Key
+   GEMINI_API_KEY=your_gemini_api_key  # Get this from Google AI Studio
 
    # Server Configuration
    PORT=8080

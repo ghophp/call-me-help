@@ -37,7 +37,7 @@ func (t *TwilioService) GenerateTwiML(callbackURL string) string {
 	log.Printf("Generating TwiML with Stream URL: %s", callbackURL)
 
 	// Create a TwiML response that connects the call to our media stream
-	// Using the Twilio Stream parameters to pass the CallSid to avoid URL query issues
+	// Add longer pauses and clearer instructions to encourage speaking
 	twiml := `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
@@ -45,8 +45,7 @@ func (t *TwilioService) GenerateTwiML(callbackURL string) string {
       <Parameter name="CallSid" value="{{CallSid}}" />
     </Stream>
   </Start>
-  <Say>Hello, I'm your therapy assistant. How are you feeling today?</Say>
-  <Pause length="120"/>
+  <Say voice="Polly.Joanna">Hello, I'm your therapy assistant. How are you feeling today?</Say>
 </Response>`
 
 	log.Printf("Generated TwiML response: %s", twiml)
