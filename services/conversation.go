@@ -2,6 +2,8 @@ package services
 
 import (
 	"sync"
+
+	"github.com/ghophp/call-me-help/logger"
 )
 
 // Message represents a message in the conversation
@@ -21,12 +23,17 @@ type Conversation struct {
 type ConversationService struct {
 	conversations map[string]*Conversation
 	mu            sync.Mutex
+	log           *logger.Logger
 }
 
 // NewConversationService creates a new conversation service
 func NewConversationService() *ConversationService {
+	log := logger.Component("Conversation")
+	log.Info("Creating new Conversation service")
+
 	return &ConversationService{
 		conversations: make(map[string]*Conversation),
+		log:           log,
 	}
 }
 
@@ -36,10 +43,12 @@ func (c *ConversationService) GetOrCreateConversation(id string) *Conversation {
 	defer c.mu.Unlock()
 
 	if conv, ok := c.conversations[id]; ok {
+		c.log.Debug("Retrieved existing conversation for call %s", id)
 		return conv
 	}
 
 	// Create a new conversation
+	c.log.Info("Creating new conversation for call %s", id)
 	conv := &Conversation{
 		ID:       id,
 		Messages: []Message{},
