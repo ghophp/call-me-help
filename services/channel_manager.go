@@ -2,10 +2,12 @@ package services
 
 import (
 	"context"
-	"io"
+	"errors"
 	"log"
 	"sync"
 	"time"
+
+	"cloud.google.com/go/speech/apiv1/speechpb"
 )
 
 // ChannelData holds the channels for a specific call
@@ -103,12 +105,12 @@ func (cm *ChannelManager) GetMostRecentCallSID() string {
 }
 
 // StartAudioProcessing starts processing audio through speech-to-text
-func (cm *ChannelManager) StartAudioProcessing(ctx context.Context, callSID string, stt *SpeechToTextService) {
+func (cm *ChannelManager) StartAudioProcessing(ctx context.Context, callSID string, stt *SpeechToTextService) (speechpb.Speech_StreamingRecognizeClient, error) {
 	log.Printf("Starting audio processing for call %s", callSID)
 	channels, ok := cm.GetChannels(callSID)
 	if !ok {
 		log.Printf("No channels found for call %s, cannot start audio processing", callSID)
-		return
+		return nil, errors.New("no channels found for call")
 	}
 
 	// Set processing flag to avoid multiple processors for same call
@@ -116,7 +118,7 @@ func (cm *ChannelManager) StartAudioProcessing(ctx context.Context, callSID stri
 	if channels.isProcessingAudio {
 		log.Printf("Audio processing already in progress for call %s", callSID)
 		channels.processingAudioMutex.Unlock()
-		return
+		return nil, errors.New("audio processing already in progress")
 	}
 	channels.isProcessingAudio = true
 	channels.processingAudioMutex.Unlock()
@@ -124,43 +126,15 @@ func (cm *ChannelManager) StartAudioProcessing(ctx context.Context, callSID stri
 
 	// Create a pipe for streaming the audio data
 	log.Printf("Creating pipe for audio streaming for call %s", callSID)
-	pipeReader, pipeWriter := io.Pipe()
 
 	// Start streaming recognition
 	log.Printf("Initiating Speech-to-Text streaming for call %s", callSID)
-	transcriptionChan, err := stt.StreamingRecognize(ctx, pipeReader)
+	transcriptionChan, stream, err := stt.StreamingRecognize(ctx)
 	if err != nil {
 		log.Printf("Error starting streaming recognition for call %s: %v", callSID, err)
-		return
+		return nil, err
 	}
 	log.Printf("Speech-to-Text streaming started for call %s", callSID)
-
-	// Forward audio data to the pipe
-	go func() {
-		log.Printf("Starting audio forwarding goroutine for call %s", callSID)
-		defer pipeWriter.Close()
-		defer log.Printf("Audio forwarding goroutine ended for call %s", callSID)
-
-		for {
-			select {
-			case <-ctx.Done():
-				log.Printf("Context canceled, stopping audio forwarding for call %s", callSID)
-				return
-
-			case audioData := <-channels.AudioInputChan:
-				if len(audioData) == 0 {
-					continue // Skip empty data
-				}
-
-				log.Printf("Writing %d bytes of audio data to pipe for call %s", len(audioData), callSID)
-
-				if _, err := pipeWriter.Write(audioData); err != nil {
-					log.Printf("Error writing to pipe for call %s: %v", callSID, err)
-					return
-				}
-			}
-		}
-	}()
 
 	// Forward transcriptions to the transcription channel
 	go func() {
@@ -188,6 +162,7 @@ func (cm *ChannelManager) StartAudioProcessing(ctx context.Context, callSID stri
 	}()
 
 	log.Printf("Audio processing successfully started for call %s", callSID)
+	return stream, nil
 }
 
 // AppendAudioData adds audio data to the buffer and input channel

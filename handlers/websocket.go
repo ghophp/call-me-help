@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"cloud.google.com/go/speech/apiv1/speechpb"
 	"github.com/ghophp/call-me-help/services"
 	"github.com/gorilla/websocket"
 )
@@ -96,7 +97,11 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 		defer cancel()
 
 		log.Printf("Starting audio processing for call %s", callSID)
-		svc.ChannelManager.StartAudioProcessing(ctx, callSID, svc.SpeechToText)
+		stream, err := svc.ChannelManager.StartAudioProcessing(ctx, callSID, svc.SpeechToText)
+		if err != nil {
+			log.Printf("Error starting audio processing for call %s: %v", callSID, err)
+			return
+		}
 
 		// Process transcriptions and generate responses
 		log.Printf("Starting transcription processing for call %s", callSID)
@@ -171,12 +176,13 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 						continue
 					}
 
-					channels.AppendAudioData(decodedPayload)
+					stream.Send(&speechpb.StreamingRecognizeRequest{
+						StreamingRequest: &speechpb.StreamingRecognizeRequest_AudioContent{
+							AudioContent: decodedPayload,
+						},
+					})
 				case "start":
 					log.Printf("Stream started: %s", event.StreamSid)
-					// Make sure we have channels for this call
-					channels, _ = svc.ChannelManager.GetChannels(callSID)
-
 				case "stop":
 					log.Printf("Stream stopped: %s", event.StreamSid)
 					if event.Stop != nil {
