@@ -94,12 +94,6 @@ func main() {
 	// Health check endpoint
 	mux.HandleFunc("GET /health", handlers.HealthCheck)
 
-	// Test endpoint for TTS -> STT service loop
-	mux.HandleFunc("GET /test/tts-stt-loop", handlers.TestTTSSTTLoop(serviceContainer))
-
-	// HTML UI for testing speech services
-	mux.HandleFunc("GET /test/speech-ui", handlers.TestSpeechUI)
-
 	// Create the HTTP server
 	server := &http.Server{
 		Addr:    ":" + *port,

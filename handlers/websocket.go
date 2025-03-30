@@ -78,80 +78,26 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("WebSocket connection request received: %s", r.URL.String())
 
-		// Extract Twilio Connection parameters from all possible sources
-		var callSID string
-		var parameters map[string]string
-
-		// First parse any query parameters
-		query := r.URL.Query()
-		log.Printf("WebSocket URL query parameters: %v", query)
-
-		// Check URL query parameters
-		callSID = query.Get("callSid")
-		if callSID == "" {
-			callSID = query.Get("CallSid")
-		}
-
-		// Attempt to parse any parameters from headers
-		// Twilio might send parameters as X-Twilio-Params
-		twilioParamsHeader := r.Header.Get("X-Twilio-Params")
-		if twilioParamsHeader != "" {
-			log.Printf("Found Twilio params header: %s", twilioParamsHeader)
-			parameters = parseParameters(twilioParamsHeader)
-
-			// Check if CallSid is in the parameters
-			if sid, ok := parameters["CallSid"]; ok && sid != "" {
-				callSID = sid
-				log.Printf("Found CallSid %s in parameters", callSID)
-			}
-		}
-
-		// Look for custom headers Twilio might add
-		if callSID == "" {
-			for name, values := range r.Header {
-				if strings.HasPrefix(strings.ToLower(name), "x-twilio") {
-					log.Printf("Twilio header: %s = %v", name, values)
-				}
-
-				if (strings.ToLower(name) == "x-twilio-callsid" ||
-					strings.ToLower(name) == "x-twilio-call-sid") && len(values) > 0 {
-					callSID = values[0]
-					log.Printf("Found CallSid %s in header %s", callSID, name)
-				}
-			}
-		}
-
-		// Try to parse form data if needed
-		if callSID == "" {
-			err := r.ParseForm()
-			if err == nil {
-				for name, values := range r.Form {
-					log.Printf("Form field: %s = %v", name, values)
-
-					if (name == "CallSid" || name == "callSid") && len(values) > 0 {
-						callSID = values[0]
-						log.Printf("Found CallSid %s in form field %s", callSID, name)
-					}
-				}
-			}
-		}
-
-		// As a last resort, check for any active calls
-		if callSID == "" {
-			callSID = svc.ChannelManager.GetMostRecentCallSID()
-			if callSID != "" {
-				log.Printf("Using most recent call SID as fallback: %s", callSID)
-			} else {
-				log.Printf("WebSocket error: Could not determine CallSid from request")
-				http.Error(w, "Missing CallSid parameter", http.StatusBadRequest)
-				return
-			}
+		callSID := svc.ChannelManager.GetMostRecentCallSID()
+		if callSID != "" {
+			log.Printf("Using most recent call SID as fallback: %s", callSID)
+		} else {
+			log.Printf("WebSocket error: Could not determine CallSid from request")
+			http.Error(w, "Missing CallSid parameter", http.StatusBadRequest)
+			return
 		}
 
 		log.Printf("Using CallSid: %s for WebSocket connection", callSID)
 
 		// Upgrade the HTTP connection to a WebSocket connection
 		log.Printf("Upgrading connection to WebSocket for call %s", callSID)
+		upgrader.CheckOrigin = func(r *http.Request) bool {
+			// Log origin for debugging
+			origin := r.Header.Get("Origin")
+			log.Printf("WebSocket origin check: %s", origin)
+			return true // Accept all origins for Twilio
+		}
+
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Printf("Error upgrading to WebSocket: %v", err)
@@ -159,6 +105,8 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 		}
 		defer conn.Close()
 
+		// Set a longer read deadline to prevent timeouts
+		conn.SetReadDeadline(time.Time{}) // No deadline
 		log.Printf("WebSocket connection established for call %s", callSID)
 
 		// Get channels for this call
@@ -186,6 +134,35 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 		log.Printf("Starting audio response sender for call %s", callSID)
 		go sendAudioResponses(conn, channels)
 
+		// Add a ping handler
+		conn.SetPingHandler(func(data string) error {
+			log.Printf("Received ping from client, sending pong")
+			err := conn.WriteControl(websocket.PongMessage, []byte{}, time.Now().Add(time.Second))
+			if err != nil {
+				log.Printf("Error sending pong: %v", err)
+			}
+			return nil
+		})
+
+		// Keep the connection alive with pings
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					log.Printf("Sending ping to client")
+					if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(time.Second)); err != nil {
+						log.Printf("Error sending ping: %v", err)
+						return
+					}
+				}
+			}
+		}()
+
 		// Keep the connection alive and process messages
 		for {
 			// Read messages (might be JSON from Twilio)
@@ -199,8 +176,18 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 			switch messageType {
 			case websocket.BinaryMessage:
 				// Process binary audio data directly
-				log.Printf("Received binary data: %d bytes", len(data))
+				dataLen := len(data)
+				log.Printf("Received binary data: %d bytes", dataLen)
+
+				if dataLen == 0 {
+					log.Printf("Ignoring empty binary message")
+					continue
+				}
+
+				// Check audio format for debugging
 				checkAudioFormat(data)
+
+				// Send data to audio processing channel
 				channels.AppendAudioData(data)
 
 			case websocket.TextMessage:
@@ -234,13 +221,16 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 
 				case "start":
 					log.Printf("Stream started: %s", event.StreamSid)
+					// Make sure we have channels for this call
+					channels, _ = svc.ChannelManager.GetChannels(callSID)
 
 				case "stop":
 					log.Printf("Stream stopped: %s", event.StreamSid)
 					if event.Stop != nil {
 						log.Printf("Call ended: %s", event.Stop.CallSid)
 					}
-					// Don't break the loop here, let the WebSocket close naturally
+					// Don't terminate connection here - let client close it
+					// so we can continue processing buffered audio
 
 				default:
 					log.Printf("Unknown event type: %s", event.Event)

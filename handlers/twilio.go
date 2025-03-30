@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ghophp/call-me-help/services"
 )
@@ -117,7 +118,7 @@ func HandleTwilioStream(svc *services.ServiceContainer) http.HandlerFunc {
 			w.WriteHeader(http.StatusOK)
 
 		case "media":
-			log.Printf("Media received for call %s", event.CallSid)
+			log.Printf("Media received for call %s, sequence #%d", event.CallSid, event.SequenceNum)
 			// Get channels for this call
 			channels, ok := svc.ChannelManager.GetChannels(event.CallSid)
 			if !ok {
@@ -134,12 +135,23 @@ func HandleTwilioStream(svc *services.ServiceContainer) http.HandlerFunc {
 				return
 			}
 
-			log.Printf("Decoded %d bytes of audio data from media chunk", len(payload))
-			// Check audio format for debugging
+			log.Printf("Decoded %d bytes of audio data from media chunk #%d", len(payload), event.SequenceNum)
+
+			// Detailed audio format logging for debugging
 			if len(payload) > 16 {
-				log.Printf("Audio header bytes: [% x]", payload[:16])
+				log.Printf("Audio header bytes (seq #%d): [% x]", event.SequenceNum, payload[:16])
+
+				// Check for silence
+				var nonZeroCount int
+				for i := 0; i < 16; i++ {
+					if payload[i] != 0 {
+						nonZeroCount++
+					}
+				}
+				log.Printf("Non-zero bytes in first 16: %d/16 (seq #%d)", nonZeroCount, event.SequenceNum)
 			}
-			// Check for silence
+
+			// Check for silence/empty audio
 			if len(payload) > 0 {
 				allSame := true
 				firstByte := payload[0]
@@ -150,7 +162,10 @@ func HandleTwilioStream(svc *services.ServiceContainer) http.HandlerFunc {
 					}
 				}
 				if allSame {
-					log.Printf("Warning: Audio data appears to be silence or constant value: %02x", firstByte)
+					log.Printf("Warning: Audio data appears to be silence or constant value: %02x (seq #%d)",
+						firstByte, event.SequenceNum)
+				} else {
+					log.Printf("Audio data contains variation (seq #%d)", event.SequenceNum)
 				}
 			}
 
@@ -161,9 +176,17 @@ func HandleTwilioStream(svc *services.ServiceContainer) http.HandlerFunc {
 		case "stop":
 			log.Printf("Stream stopped: %s for call %s", event.StreamSid, event.CallSid)
 
-			// Clean up channels when the stream stops
-			svc.ChannelManager.RemoveChannels(event.CallSid)
+			// Don't immediately remove channels when the stream stops
+			// to allow processing of any pending audio
+			log.Printf("Will keep channels active for a while to process remaining audio")
 			w.WriteHeader(http.StatusOK)
+
+			// Schedule cleanup to happen after a delay
+			go func() {
+				time.Sleep(10 * time.Second)
+				log.Printf("Cleaning up channels for completed call %s", event.CallSid)
+				svc.ChannelManager.RemoveChannels(event.CallSid)
+			}()
 
 		default:
 			log.Printf("Unknown event: %s", event.Event)
