@@ -2,11 +2,9 @@ package handlers
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/ghophp/call-me-help/services"
@@ -44,33 +42,6 @@ type TwilioMedia struct {
 type TwilioStop struct {
 	AccountSid string `json:"accountSid"`
 	CallSid    string `json:"callSid"`
-}
-
-// checkAudioFormat performs basic validation on audio data
-func checkAudioFormat(data []byte) {
-	// Log the first few bytes to help debug format issues
-	if len(data) > 16 {
-		log.Printf("Audio header bytes: [% x]", data[:16])
-	} else if len(data) > 0 {
-		log.Printf("Audio bytes (too short): [% x]", data)
-	} else {
-		log.Printf("Warning: Empty audio data")
-	}
-
-	// Check for silence/empty audio
-	if len(data) > 0 {
-		allSame := true
-		firstByte := data[0]
-		for _, b := range data {
-			if b != firstByte {
-				allSame = false
-				break
-			}
-		}
-		if allSame {
-			log.Printf("Warning: Audio data appears to be silence or constant value: %02x", firstByte)
-		}
-	}
 }
 
 // HandleWebSocket handles WebSocket connections for streaming audio
@@ -174,22 +145,6 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 
 			// Handle different message types
 			switch messageType {
-			case websocket.BinaryMessage:
-				// Process binary audio data directly
-				dataLen := len(data)
-				log.Printf("Received binary data: %d bytes", dataLen)
-
-				if dataLen == 0 {
-					log.Printf("Ignoring empty binary message")
-					continue
-				}
-
-				// Check audio format for debugging
-				checkAudioFormat(data)
-
-				// Send data to audio processing channel
-				channels.AppendAudioData(data)
-
 			case websocket.TextMessage:
 				// Parse text message as JSON
 				log.Printf("Received text message: %s", string(data))
@@ -207,18 +162,7 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 						log.Printf("Media event with no media data")
 						continue
 					}
-
-					// Decode base64 payload
-					mediaData, err := base64.StdEncoding.DecodeString(event.Media.Payload)
-					if err != nil {
-						log.Printf("Error decoding base64 payload: %v", err)
-						continue
-					}
-
-					log.Printf("Decoded %d bytes of audio from media event", len(mediaData))
-					checkAudioFormat(mediaData)
-					channels.AppendAudioData(mediaData)
-
+					channels.AppendAudioData([]byte(event.Media.Payload))
 				case "start":
 					log.Printf("Stream started: %s", event.StreamSid)
 					// Make sure we have channels for this call
@@ -250,24 +194,6 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 
 		log.Printf("WebSocket connection closed for call %s", callSID)
 	}
-}
-
-// Parse parameter string from Twilio header
-func parseParameters(paramsString string) map[string]string {
-	params := make(map[string]string)
-
-	// Simple parameter parsing - can be extended for more complex formats
-	parts := strings.Split(paramsString, ";")
-	for _, part := range parts {
-		kv := strings.SplitN(part, "=", 2)
-		if len(kv) == 2 {
-			key := strings.TrimSpace(kv[0])
-			value := strings.TrimSpace(kv[1])
-			params[key] = value
-		}
-	}
-
-	return params
 }
 
 // Process transcriptions and generate responses

@@ -84,11 +84,7 @@ func main() {
 	log.Println("Setting up HTTP handlers...")
 	mux := http.NewServeMux()
 
-	// Twilio webhook endpoints
 	mux.HandleFunc("POST /twilio/call", handlers.HandleIncomingCall(serviceContainer))
-	mux.HandleFunc("POST /twilio/stream", handlers.HandleTwilioStream(serviceContainer))
-
-	// WebSocket endpoint for media streaming
 	mux.HandleFunc("GET /ws", handlers.HandleWebSocket(serviceContainer))
 
 	// Health check endpoint

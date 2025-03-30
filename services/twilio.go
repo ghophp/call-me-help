@@ -41,16 +41,10 @@ func (t *TwilioService) GenerateTwiML(callbackURL string) string {
 	twiml := `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
-    <Stream url="` + callbackURL + `">
-      <Parameter name="CallSid" value="{{CallSid}}" />
-    </Stream>
+    <Stream url="` + callbackURL + `"/>
   </Start>
-  <Say voice="Polly.Joanna">Hello</Say>
-  <Connect>
-    <Stream url="` + callbackURL + `">
-      <Parameter name="CallSid" value="{{CallSid}}" />
-    </Stream>
-  </Connect>
+  <Say>Hello</Say>
+  <Pause length="60" />
 </Response>`
 
 	log.Printf("Generated TwiML response: %s", twiml)

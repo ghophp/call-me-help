@@ -1,7 +1,6 @@
 package services
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"log"
@@ -17,7 +16,6 @@ type ChannelData struct {
 	TranscriptionChan    chan string
 	ResponseTextChan     chan string
 	ResponseAudioChan    chan []byte
-	audioBuffer          *bytes.Buffer
 	isProcessingAudio    bool
 	processingAudioMutex sync.Mutex
 }
@@ -49,7 +47,6 @@ func (cm *ChannelManager) CreateChannels(callSID string) *ChannelData {
 		TranscriptionChan: make(chan string, 10),
 		ResponseTextChan:  make(chan string, 10),
 		ResponseAudioChan: make(chan []byte, 10),
-		audioBuffer:       &bytes.Buffer{},
 	}
 
 	cm.channels[callSID] = channels
@@ -129,10 +126,6 @@ func (cm *ChannelManager) StartAudioProcessing(ctx context.Context, callSID stri
 	log.Printf("Creating pipe for audio streaming for call %s", callSID)
 	pipeReader, pipeWriter := io.Pipe()
 
-	// Buffer for aggregating small audio chunks
-	var audioBuffer bytes.Buffer
-	const minChunkSize = 4000 // Process in larger chunks for better STT performance
-
 	// Start streaming recognition
 	log.Printf("Initiating Speech-to-Text streaming for call %s", callSID)
 	transcriptionChan, err := stt.StreamingRecognize(ctx, pipeReader)
@@ -148,66 +141,22 @@ func (cm *ChannelManager) StartAudioProcessing(ctx context.Context, callSID stri
 		defer pipeWriter.Close()
 		defer log.Printf("Audio forwarding goroutine ended for call %s", callSID)
 
-		// Process audio from the channel
-		var totalBytesProcessed int64
-		lastFlushTime := time.Now()
-
-		flushBuffer := func() {
-			if audioBuffer.Len() == 0 {
-				return
-			}
-
-			bufBytes := audioBuffer.Bytes()
-			log.Printf("Flushing %d bytes to STT pipe for call %s", len(bufBytes), callSID)
-
-			if _, err := pipeWriter.Write(bufBytes); err != nil {
-				log.Printf("Error writing to pipe for call %s: %v", callSID, err)
-				return
-			}
-
-			totalBytesProcessed += int64(len(bufBytes))
-			log.Printf("Wrote %d bytes to STT pipe (%d total) for call %s",
-				len(bufBytes), totalBytesProcessed, callSID)
-
-			audioBuffer.Reset()
-			lastFlushTime = time.Now()
-		}
-
-		// Ticker to ensure we flush data periodically even if we're not getting enough
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
-
 		for {
 			select {
 			case <-ctx.Done():
 				log.Printf("Context canceled, stopping audio forwarding for call %s", callSID)
-				flushBuffer() // Final flush
 				return
 
-			case <-ticker.C:
-				// Periodically flush data if it's been too long
-				if audioBuffer.Len() > 0 && time.Since(lastFlushTime) > 500*time.Millisecond {
-					log.Printf("Flushing audio buffer due to timeout, %d bytes", audioBuffer.Len())
-					flushBuffer()
-				}
-
-			case audioData, ok := <-channels.AudioInputChan:
-				if !ok {
-					log.Printf("Audio channel closed for call %s", callSID)
-					flushBuffer() // Final flush
-					return
-				}
-
+			case audioData := <-channels.AudioInputChan:
 				if len(audioData) == 0 {
 					continue // Skip empty data
 				}
 
-				// Append to buffer
-				audioBuffer.Write(audioData)
+				log.Printf("Writing %d bytes of audio data to pipe for call %s", len(audioData), callSID)
 
-				// Flush if buffer is large enough
-				if audioBuffer.Len() >= minChunkSize {
-					flushBuffer()
+				if _, err := pipeWriter.Write(audioData); err != nil {
+					log.Printf("Error writing to pipe for call %s: %v", callSID, err)
+					return
 				}
 			}
 		}
@@ -256,40 +205,5 @@ func (cd *ChannelData) AppendAudioData(data []byte) {
 	log.Printf("Appending %d bytes of audio data for call %s", len(data), cd.CallSID)
 
 	// Write to buffer
-	if _, err := cd.audioBuffer.Write(data); err != nil {
-		log.Printf("Error writing to audio buffer: %v", err)
-	}
-
-	// Send data to the audio input channel with retry
-	for attempts := 0; attempts < 3; attempts++ {
-		select {
-		case cd.AudioInputChan <- data:
-			log.Printf("Sent %d bytes to audio input channel for call %s", len(data), cd.CallSID)
-			return
-		default:
-			if attempts < 2 {
-				// Try to read from the channel to make space
-				log.Printf("Audio input channel full for call %s, clearing space (attempt %d)", cd.CallSID, attempts+1)
-				select {
-				case <-cd.AudioInputChan:
-					log.Printf("Removed oldest audio chunk to make space")
-				default:
-					// If we can't read immediately, just continue to next attempt
-					time.Sleep(10 * time.Millisecond)
-				}
-			} else {
-				log.Printf("WARNING: Audio input channel full for call %s after retries, dropping data", cd.CallSID)
-			}
-		}
-	}
-}
-
-// ResetAudioBuffer clears the audio buffer
-func (cd *ChannelData) ResetAudioBuffer() {
-	cd.processingAudioMutex.Lock()
-	defer cd.processingAudioMutex.Unlock()
-
-	log.Printf("Resetting audio buffer for call %s", cd.CallSID)
-	cd.audioBuffer.Reset()
-	log.Printf("Audio buffer reset for call %s", cd.CallSID)
+	cd.AudioInputChan <- data
 }

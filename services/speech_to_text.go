@@ -98,11 +98,10 @@ func (s *SpeechToTextService) StreamingRecognize(ctx context.Context, audioStrea
 	// Process audio stream and recognition results
 	go func() {
 		log.Printf("Starting audio processing goroutine")
-		defer close(transcriptionChan)
 		defer log.Printf("Audio processing goroutine completed")
 
 		// Read audio in chunks and send to Google
-		buf := make([]byte, 8000) // Larger buffer for more efficient processing
+		buf := make([]byte, 1024)
 
 		// Keep track of audio bytes sent for debugging
 		var totalBytesSent int64
