@@ -43,10 +43,10 @@ func (cm *ChannelManager) CreateChannels(callSID string) *ChannelData {
 	channels := &ChannelData{
 		CallSID:           callSID,
 		CreatedAt:         time.Now(),
-		AudioInputChan:    make(chan []byte, 100),
-		TranscriptionChan: make(chan string, 10),
-		ResponseTextChan:  make(chan string, 10),
-		ResponseAudioChan: make(chan []byte, 10),
+		AudioInputChan:    make(chan []byte, 1024),
+		TranscriptionChan: make(chan string, 1024),
+		ResponseTextChan:  make(chan string, 1024),
+		ResponseAudioChan: make(chan []byte, 1024),
 	}
 
 	cm.channels[callSID] = channels

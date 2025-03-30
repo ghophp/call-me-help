@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -162,7 +163,15 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 						log.Printf("Media event with no media data")
 						continue
 					}
-					channels.AppendAudioData([]byte(event.Media.Payload))
+
+					// Decode base64 payload to binary
+					decodedPayload, err := base64.StdEncoding.DecodeString(event.Media.Payload)
+					if err != nil {
+						log.Printf("Error decoding base64 payload: %v", err)
+						continue
+					}
+
+					channels.AppendAudioData(decodedPayload)
 				case "start":
 					log.Printf("Stream started: %s", event.StreamSid)
 					// Make sure we have channels for this call
