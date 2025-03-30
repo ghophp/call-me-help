@@ -2,6 +2,10 @@ package services
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	texttospeech "cloud.google.com/go/texttospeech/apiv1"
@@ -56,18 +60,23 @@ func (t *TextToSpeechService) SynthesizeSpeech(ctx context.Context, text string)
 		Voice: &texttospeechpb.VoiceSelectionParams{
 			LanguageCode: "en-US",
 			SsmlGender:   texttospeechpb.SsmlVoiceGender_NEUTRAL,
+			Name:         "en-US-Standard-I", // Using a specific voice for consistency
 		},
 		AudioConfig: &texttospeechpb.AudioConfig{
 			AudioEncoding:   texttospeechpb.AudioEncoding_MULAW,
-			SampleRateHertz: 8000, // For telephony
+			SampleRateHertz: 8000, // 8kHz for telephony (Twilio requirement)
+			EffectsProfileId: []string{
+				"telephony-class-application", // Optimize for telephony
+			},
 		},
 	}
 
-	t.log.Debug("Configured TTS request: language=%s, gender=%s, encoding=%s, sampleRate=%d",
+	t.log.Debug("Configured TTS request: language=%s, gender=%s, encoding=%s, sampleRate=%d, voice=%s",
 		req.Voice.LanguageCode,
 		req.Voice.SsmlGender,
 		req.AudioConfig.AudioEncoding,
-		req.AudioConfig.SampleRateHertz)
+		req.AudioConfig.SampleRateHertz,
+		req.Voice.Name)
 
 	// Create a timeout for the API call
 	ttsCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -91,4 +100,45 @@ func (t *TextToSpeechService) SynthesizeSpeech(ctx context.Context, text string)
 
 	t.log.Info("Successfully synthesized %d bytes of audio", len(resp.AudioContent))
 	return resp.AudioContent, nil
+}
+
+// SaveAudioToFile saves audio content to a file
+func (t *TextToSpeechService) SaveAudioToFile(callSID string, text string, audioData []byte) error {
+	// Use the configured output directory
+	outputDir := t.config.AudioOutputDirectory
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		t.log.Error("Failed to create output directory: %v", err)
+		return err
+	}
+
+	// Create a unique filename based on call SID and timestamp
+	timestamp := time.Now().Format("20060102-150405.000")
+	sanitizedText := sanitizeFilename(text)
+	if len(sanitizedText) > 30 {
+		sanitizedText = sanitizedText[:30] // Limit text length in filename
+	}
+
+	filename := fmt.Sprintf("%s/%s_%s_%s.raw", outputDir, callSID, timestamp, sanitizedText)
+
+	// Save the audio data to file
+	t.log.Info("Saving %d bytes of audio to file: %s", len(audioData), filename)
+	if err := os.WriteFile(filename, audioData, 0644); err != nil {
+		t.log.Error("Failed to save audio to file: %v", err)
+		return err
+	}
+
+	t.log.Info("Successfully saved audio to file: %s", filename)
+	return nil
+}
+
+// sanitizeFilename removes special characters from a string to make it safe for use in a filename
+func sanitizeFilename(input string) string {
+	// Replace spaces with underscores
+	result := strings.ReplaceAll(input, " ", "_")
+
+	// Remove non-alphanumeric characters
+	reg := regexp.MustCompile("[^a-zA-Z0-9_]")
+	result = reg.ReplaceAllString(result, "")
+
+	return result
 }

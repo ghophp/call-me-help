@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/speech/apiv1/speechpb"
@@ -121,6 +123,18 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 			return
 		}
 
+		// Store stream SID for later use
+		streamSID := "STREAM_" + callSID
+		var streamMutex sync.Mutex
+		updateStreamSID := func(sid string) {
+			streamMutex.Lock()
+			defer streamMutex.Unlock()
+			if sid != "" {
+				streamSID = sid
+				log.Info("Updated StreamSid to: %s", streamSID)
+			}
+		}
+
 		log.Info("Using CallSid: %s for WebSocket connection", callSID)
 
 		// Upgrade the HTTP connection to a WebSocket connection
@@ -143,6 +157,17 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 		conn.SetReadDeadline(time.Time{}) // No deadline
 		log.Info("WebSocket connection established for call %s", callSID)
 
+		// Send a "mark" event immediately to confirm connection
+		markMsg := map[string]string{
+			"event": "mark",
+			"name":  "connection_established",
+		}
+		if err := conn.WriteJSON(markMsg); err != nil {
+			log.Error("Error sending initial mark event: %v", err)
+		} else {
+			log.Info("Sent initial mark event to confirm connection")
+		}
+
 		// Get channels for this call
 		channels, ok := svc.ChannelManager.GetChannels(callSID)
 		if !ok {
@@ -150,13 +175,32 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 			channels = svc.ChannelManager.CreateChannels(callSID)
 		}
 
+		// Send a simple welcome message
+		go func() {
+			// Wait a brief moment to ensure everything is set up
+			time.Sleep(2 * time.Second)
+
+			// Send welcome message
+			welcomeMsg := "Hello. I'm your AI therapist. How are you feeling today?"
+			log.Info("Sending welcome message: %s", welcomeMsg)
+
+			select {
+			case channels.ResponseTextChan <- welcomeMsg:
+				log.Info("Welcome message sent to text channel")
+			default:
+				log.Warn("Could not send welcome message, text channel full")
+			}
+		}()
+
 		// Create conversation for this call
 		conversation := svc.Conversation.GetOrCreateConversation(callSID)
 
-		// Start processing audio for this call
+		// Add a new context value to pass the streamSID
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		ctx = context.WithValue(ctx, "streamSID", streamSID)
 
+		// Start processing audio for this call
 		log.Info("Starting audio processing for call %s", callSID)
 		stream, err := svc.ChannelManager.StartAudioProcessing(ctx, callSID, svc.SpeechToText)
 		if err != nil {
@@ -170,7 +214,7 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 
 		// Send audio responses back to the client
 		log.Info("Starting audio response sender for call %s", callSID)
-		go sendAudioResponses(conn, channels, log)
+		go sendAudioResponses(conn, channels, streamSID, &streamMutex, log)
 
 		// Add a ping handler
 		conn.SetPingHandler(func(data string) error {
@@ -184,7 +228,7 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 
 		// Keep the connection alive with pings
 		go func() {
-			ticker := time.NewTicker(30 * time.Second)
+			ticker := time.NewTicker(15 * time.Second) // More frequent pings
 			defer ticker.Stop()
 
 			for {
@@ -193,9 +237,19 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 					return
 				case <-ticker.C:
 					log.Debug("Sending ping to client")
-					if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(time.Second)); err != nil {
+					if err := conn.WriteControl(websocket.PingMessage, []byte("keepalive"), time.Now().Add(10*time.Second)); err != nil {
 						log.Error("Error sending ping: %v", err)
-						return
+						// Don't return on error, try to keep the connection alive
+						continue
+					}
+
+					// Also send a keepalive mark message
+					markMsg := map[string]string{
+						"event": "mark",
+						"name":  "keepalive_" + strconv.FormatInt(time.Now().Unix(), 10),
+					}
+					if err := conn.WriteJSON(markMsg); err != nil {
+						log.Error("Error sending keepalive mark: %v", err)
 					}
 				}
 			}
@@ -203,10 +257,20 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 
 		// Keep the connection alive and process messages
 		for {
+			// Set a longer read deadline to prevent timeouts
+			if err := conn.SetReadDeadline(time.Time{}); err != nil {
+				log.Error("Error setting read deadline: %v", err)
+				// Continue anyway
+			}
+
 			// Read messages (might be JSON from Twilio)
 			messageType, data, err := conn.ReadMessage()
 			if err != nil {
-				log.Error("WebSocket read error: %v", err)
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+					log.Error("WebSocket unexpected close error: %v", err)
+				} else {
+					log.Info("WebSocket connection closed: %v", err)
+				}
 				break
 			}
 
@@ -226,7 +290,7 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 				switch event.Event {
 				case "media":
 					if event.Media == nil {
-						log.Warn("Media event with no media data")
+						log.Warn("Media event with no media data for call %s", callSID)
 						continue
 					}
 
@@ -237,20 +301,44 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 						continue
 					}
 
-					stream.Send(&speechpb.StreamingRecognizeRequest{
+					log.Debug("Decoded %d bytes of audio data from track: %s", len(decodedPayload), event.Media.Track)
+
+					// Send to speech recognition
+					err = stream.Send(&speechpb.StreamingRecognizeRequest{
 						StreamingRequest: &speechpb.StreamingRecognizeRequest_AudioContent{
 							AudioContent: decodedPayload,
 						},
 					})
+
+					if err != nil {
+						log.Error("Error sending audio to speech recognition: %v", err)
+					} else {
+						log.Debug("Sent %d bytes to speech recognition", len(decodedPayload))
+					}
+
 				case "start":
-					log.Info("Stream started: %s", event.StreamSid)
+					log.Info("Stream started: %s for call %s", event.StreamSid, callSID)
+
+					// Update the StreamSid with the actual one from Twilio
+					updateStreamSID(event.StreamSid)
+
+					// Send a welcome message
+					welcomeMsg := "Connection established. I'm listening."
+					select {
+					case channels.ResponseTextChan <- welcomeMsg:
+						log.Debug("Sent welcome message to response channel")
+					default:
+						log.Warn("Could not send welcome message, channel full")
+					}
+
 				case "stop":
 					log.Info("Stream stopped: %s", event.StreamSid)
 					if event.Stop != nil {
 						log.Info("Call ended: %s", event.Stop.CallSid)
 					}
-					// Don't terminate connection here - let client close it
-					// so we can continue processing buffered audio
+
+				case "mark":
+					log.Debug("Mark event received: %v", event)
 
 				default:
 					log.Warn("Unknown event type: %s", event.Event)
@@ -264,7 +352,7 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 				}
 
 			default:
-				log.Debug("Received message of type: %d", messageType)
+				log.Debug("Received message of type: %d with %d bytes", messageType, len(data))
 			}
 		}
 
@@ -397,6 +485,12 @@ func processTranscription(
 	log.Info("Text-to-speech conversion completed for call %s in %v, %d bytes",
 		channels.CallSID, elapsed, len(audioData))
 
+	// Save the TTS-generated audio to a file
+	if err := svc.TextToSpeech.SaveAudioToFile(channels.CallSID, response, audioData); err != nil {
+		log.Error("Error saving TTS audio to file for call %s: %v", channels.CallSID, err)
+		// Continue even if saving fails - this is a non-critical operation
+	}
+
 	// Send the audio to the channel
 	log.Debug("Sending audio response to channel for call %s", channels.CallSID)
 	select {
@@ -408,22 +502,109 @@ func processTranscription(
 }
 
 // Send audio responses back to the client
-func sendAudioResponses(conn *websocket.Conn, channels *services.ChannelData, log *logger.Logger) {
+func sendAudioResponses(conn *websocket.Conn, channels *services.ChannelData, streamSID string, streamMutex *sync.Mutex, log *logger.Logger) {
 	log.Info("Audio response sender started for call %s", channels.CallSID)
+
+	// Maximum chunk size to avoid large packets - keep under 16KB
+	const maxChunkSize = 3200 // 400ms of 8kHz audio (μ-law is 8000 samples/sec at 8-bit)
+
+	// Create a sequence number for media messages
+	var sequenceNumber int64 = 1
+
+	// Send media message in Twilio format
+	sendMediaMessage := func(data []byte) error {
+		// Get the current streamSID (could have been updated)
+		streamMutex.Lock()
+		currentStreamSID := streamSID
+		streamMutex.Unlock()
+
+		// Get payload details
+		seqNumStr := strconv.FormatInt(sequenceNumber, 10)
+		timestampStr := strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10)
+		encodedData := base64.StdEncoding.EncodeToString(data)
+
+		log.Info("Preparing to send audio chunk with sequence %s", seqNumStr)
+
+		// Construct media message according to Twilio docs
+		// https://www.twilio.com/docs/voice/twiml/stream
+		mediaMsg := map[string]interface{}{
+			"event":          "media",
+			"streamSid":      currentStreamSID,
+			"sequenceNumber": seqNumStr,
+			"media": map[string]string{
+				"payload": encodedData,
+				// This is critically important: tracks from your server to Twilio must be "outbound" in Twilio's terms
+				"track":     "outbound",
+				"chunk":     "1",
+				"timestamp": timestampStr,
+			},
+		}
+
+		// Marshal to JSON
+		jsonBytes, err := json.Marshal(mediaMsg)
+		if err != nil {
+			log.Error("Error marshaling media message: %v", err)
+			return err
+		}
+
+		sequenceNumber++
+
+		// Send the message
+		log.Info("Sending audio chunk of %d bytes with sequence %s", len(data), seqNumStr)
+		return conn.WriteMessage(websocket.TextMessage, jsonBytes)
+	}
 
 	for {
 		select {
-		case audioData := <-channels.ResponseAudioChan:
-			log.Info("Sending audio data via WebSocket: %d bytes", len(audioData))
-
-			// Send audio data to the client
-			if err := conn.WriteMessage(websocket.BinaryMessage, audioData); err != nil {
-				log.Error("Error sending audio via WebSocket: %v", err)
+		case audioData, ok := <-channels.ResponseAudioChan:
+			if !ok {
+				log.Warn("Audio response channel closed for call %s", channels.CallSID)
 				return
 			}
 
-			// Add a small delay to avoid flooding the connection
-			time.Sleep(100 * time.Millisecond)
+			log.Info("Sending audio data via WebSocket for call %s: %d bytes", channels.CallSID, len(audioData))
+
+			// For large audio files, break them into smaller chunks
+			if len(audioData) > maxChunkSize {
+				log.Debug("Breaking audio into chunks for call %s, total size: %d bytes",
+					channels.CallSID, len(audioData))
+
+				totalChunks := (len(audioData) + maxChunkSize - 1) / maxChunkSize
+				log.Info("Will send %d audio chunks for call %s", totalChunks, channels.CallSID)
+
+				for i := 0; i < totalChunks; i++ {
+					start := i * maxChunkSize
+					end := start + maxChunkSize
+					if end > len(audioData) {
+						end = len(audioData)
+					}
+
+					chunk := audioData[start:end]
+					log.Info("Sending chunk %d/%d of size %d bytes for call %s",
+						i+1, totalChunks, len(chunk), channels.CallSID)
+
+					// Send in Twilio's expected format
+					if err := sendMediaMessage(chunk); err != nil {
+						log.Error("Error sending audio chunk %d/%d: %v", i+1, totalChunks, err)
+						// Try to continue with next chunk rather than breaking
+						continue
+					}
+
+					// Add a moderate delay between chunks
+					time.Sleep(100 * time.Millisecond)
+				}
+
+				log.Info("Finished sending all %d chunks for call %s", totalChunks, channels.CallSID)
+			} else {
+				// For small audio files, just send them directly
+				if err := sendMediaMessage(audioData); err != nil {
+					log.Error("Error sending audio via WebSocket: %v", err)
+					continue
+				}
+			}
+
+			// Add a larger delay after sending audio to ensure Twilio processes it
+			time.Sleep(200 * time.Millisecond)
 		}
 	}
 }

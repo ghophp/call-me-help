@@ -1,9 +1,8 @@
 package services
 
 import (
-	"log"
-
 	"github.com/ghophp/call-me-help/config"
+	"github.com/ghophp/call-me-help/logger"
 	"github.com/twilio/twilio-go"
 	twilioApi "github.com/twilio/twilio-go/rest/api/v2010"
 )
@@ -12,13 +11,15 @@ import (
 type TwilioService struct {
 	client *twilio.RestClient
 	config *config.Config
+	log    *logger.Logger
 }
 
 // NewTwilioService creates a new Twilio service
 func NewTwilioService() *TwilioService {
 	cfg := config.Load()
+	log := logger.Component("TwilioService")
 
-	log.Printf("Initializing Twilio service with account SID: %s", maskString(cfg.TwilioAccountSID))
+	log.Info("Initializing Twilio service with account SID: %s", maskString(cfg.TwilioAccountSID))
 
 	// Create a new Twilio client
 	client := twilio.NewRestClientWithParams(twilio.ClientParams{
@@ -29,31 +30,31 @@ func NewTwilioService() *TwilioService {
 	return &TwilioService{
 		client: client,
 		config: cfg,
+		log:    log,
 	}
 }
 
 // GenerateTwiML generates TwiML for an incoming call
 func (t *TwilioService) GenerateTwiML(callbackURL string) string {
-	log.Printf("Generating TwiML with Stream URL: %s", callbackURL)
+	t.log.Info("Generating TwiML with Stream URL: %s", callbackURL)
 
-	// Create a TwiML response that connects the call to our media stream
-	// and keeps it open indefinitely until the caller hangs up
+	// Use <Connect> as specified in Twilio's documentation for bidirectional streaming
 	twiml := `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Start>
-    <Stream url="` + callbackURL + `"/>
-  </Start>
-  <Say>Hello</Say>
-  <Pause length="60" />
+  <Connect>
+    <Stream url="` + callbackURL + `" mediaFormat="audio/x-mulaw;rate=8000" />
+  </Connect>
+  <Say>Welcome to the therapy hotline.</Say>
+  <Pause length="600"/>
 </Response>`
 
-	log.Printf("Generated TwiML response: %s", twiml)
+	t.log.Info("Generated TwiML response with bidirectional streaming")
 	return twiml
 }
 
 // SendMessage sends an SMS message using Twilio
 func (t *TwilioService) SendMessage(to, message string) error {
-	log.Printf("Sending SMS to %s: %s", maskPhoneNumber(to), message)
+	t.log.Info("Sending SMS to %s: %s", maskPhoneNumber(to), message)
 
 	params := &twilioApi.CreateMessageParams{}
 	params.SetTo(to)
@@ -62,11 +63,11 @@ func (t *TwilioService) SendMessage(to, message string) error {
 
 	resp, err := t.client.Api.CreateMessage(params)
 	if err != nil {
-		log.Printf("Error sending SMS: %v", err)
+		t.log.Error("Error sending SMS: %v", err)
 		return err
 	}
 
-	log.Printf("SMS sent successfully with SID: %s", *resp.Sid)
+	t.log.Info("SMS sent successfully with SID: %s", *resp.Sid)
 	return nil
 }
 

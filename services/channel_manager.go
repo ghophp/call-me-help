@@ -51,7 +51,7 @@ func (cm *ChannelManager) CreateChannels(callSID string) *ChannelData {
 		AudioInputChan:    make(chan []byte, 1024),
 		TranscriptionChan: make(chan string, 1024),
 		ResponseTextChan:  make(chan string, 1024),
-		ResponseAudioChan: make(chan []byte, 1024),
+		ResponseAudioChan: make(chan []byte),
 	}
 
 	cm.channels[callSID] = channels
@@ -169,19 +169,24 @@ func (cm *ChannelManager) StartAudioProcessing(ctx context.Context, callSID stri
 }
 
 // AppendAudioData adds audio data to the buffer and input channel
-func (cd *ChannelData) AppendAudioData(data []byte) {
+func (cd *ChannelData) AppendAudioData(log *logger.Logger, data []byte) {
 	cd.processingAudioMutex.Lock()
 	defer cd.processingAudioMutex.Unlock()
 
 	// Skip empty data
 	if len(data) == 0 {
-		logger.Debug("Skipping empty audio data for call %s", cd.CallSID)
+		log.Debug("Skipping empty audio data for call %s", cd.CallSID)
 		return
 	}
 
 	// Add data to the audio buffer
-	logger.Debug("Appending %d bytes of audio data for call %s", len(data), cd.CallSID)
+	log.Debug("Appending %d bytes of audio data for call %s", len(data), cd.CallSID)
 
 	// Write to buffer
-	cd.AudioInputChan <- data
+	select {
+	case cd.AudioInputChan <- data:
+		log.Debug("Successfully appended audio data to channel for call %s", cd.CallSID)
+	default:
+		log.Warn("AudioInputChan is full for call %s, dropping %d bytes", cd.CallSID, len(data))
+	}
 }

@@ -108,6 +108,10 @@ func main() {
 	mux.HandleFunc("POST /twilio/call", handlers.HandleIncomingCall(serviceContainer))
 	mux.HandleFunc("GET /ws", handlers.HandleWebSocket(serviceContainer))
 
+	// Audio file handling endpoints
+	mux.HandleFunc("GET /audio", handlers.ListAudioFiles())
+	mux.HandleFunc("GET /audio/download/{filename}", handlers.DownloadAudioFile())
+
 	// Health check endpoint
 	mux.HandleFunc("GET /health", handlers.HealthCheck)
 

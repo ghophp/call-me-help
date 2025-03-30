@@ -11,6 +11,8 @@
 *.test
 *.out
 
+saved_audio/
+
 # OS specific
 .DS_Store
 .Spotlight-V100

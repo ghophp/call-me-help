@@ -21,6 +21,9 @@ type Config struct {
 
 	// Logging Configuration
 	LogLevel string
+
+	// Audio Configuration
+	AudioOutputDirectory string
 }
 
 // Load loads configuration from environment variables
@@ -36,6 +39,11 @@ func Load() *Config {
 	}
 	logLevel = strings.ToUpper(logLevel)
 
+	audioOutputDir := os.Getenv("AUDIO_OUTPUT_DIR")
+	if audioOutputDir == "" {
+		audioOutputDir = "saved_audio" // Default output directory
+	}
+
 	return &Config{
 		TwilioAccountSID:      os.Getenv("TWILIO_ACCOUNT_SID"),
 		TwilioAuthToken:       os.Getenv("TWILIO_AUTH_TOKEN"),
@@ -44,5 +52,6 @@ func Load() *Config {
 		GoogleCredentialsPath: os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
 		Port:                  port,
 		LogLevel:              logLevel,
+		AudioOutputDirectory:  audioOutputDir,
 	}
 }
