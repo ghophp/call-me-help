@@ -157,10 +157,17 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 		conn.SetReadDeadline(time.Time{}) // No deadline
 		log.Info("WebSocket connection established for call %s", callSID)
 
-		// Send a "mark" event immediately to confirm connection
-		markMsg := map[string]string{
-			"event": "mark",
-			"name":  "connection_established",
+		// Send a "mark" event immediately to confirm connection and align with protocol
+		// Needs streamSid, which might not be the final one yet, but Twilio expects it.
+		streamMutex.Lock()
+		initialStreamSID := streamSID // Use the placeholder SID initially
+		streamMutex.Unlock()
+		markMsg := map[string]interface{}{ // Use interface{} for nested map
+			"event":     "mark",
+			"streamSid": initialStreamSID,
+			"mark": map[string]string{
+				"name": "connection_established",
+			},
 		}
 		if err := conn.WriteJSON(markMsg); err != nil {
 			log.Error("Error sending initial mark event: %v", err)
@@ -214,7 +221,7 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 
 		// Send audio responses back to the client
 		log.Info("Starting audio response sender for call %s", callSID)
-		go sendAudioResponses(conn, channels, streamSID, &streamMutex, log)
+		go sendAudioResponses(conn, channels, &streamSID, &streamMutex, log)
 
 		// Add a ping handler
 		conn.SetPingHandler(func(data string) error {
@@ -227,7 +234,7 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 		})
 
 		// Keep the connection alive with pings
-		go func() {
+		go func(currentConn *websocket.Conn, sidMutex *sync.Mutex) {
 			ticker := time.NewTicker(15 * time.Second) // More frequent pings
 			defer ticker.Stop()
 
@@ -237,23 +244,29 @@ func HandleWebSocket(svc *services.ServiceContainer) http.HandlerFunc {
 					return
 				case <-ticker.C:
 					log.Debug("Sending ping to client")
-					if err := conn.WriteControl(websocket.PingMessage, []byte("keepalive"), time.Now().Add(10*time.Second)); err != nil {
+					if err := currentConn.WriteControl(websocket.PingMessage, []byte("keepalive"), time.Now().Add(10*time.Second)); err != nil {
 						log.Error("Error sending ping: %v", err)
 						// Don't return on error, try to keep the connection alive
 						continue
 					}
 
-					// Also send a keepalive mark message
-					markMsg := map[string]string{
-						"event": "mark",
-						"name":  "keepalive_" + strconv.FormatInt(time.Now().Unix(), 10),
+					// Also send a keepalive mark message with the correct stream SID
+					sidMutex.Lock()
+					currentKeepaliveStreamSID := streamSID
+					sidMutex.Unlock()
+					keepaliveMarkMsg := map[string]interface{}{ // Use interface{} for nested map
+						"event":     "mark",
+						"streamSid": currentKeepaliveStreamSID,
+						"mark": map[string]string{
+							"name": "keepalive_" + strconv.FormatInt(time.Now().Unix(), 10),
+						},
 					}
-					if err := conn.WriteJSON(markMsg); err != nil {
+					if err := currentConn.WriteJSON(keepaliveMarkMsg); err != nil {
 						log.Error("Error sending keepalive mark: %v", err)
 					}
 				}
 			}
-		}()
+		}(conn, &streamMutex)
 
 		// Keep the connection alive and process messages
 		for {
@@ -491,8 +504,8 @@ func processTranscription(
 		// Continue even if saving fails - this is a non-critical operation
 	}
 
-	// Send the audio to the channel
-	log.Debug("Sending audio response to channel for call %s", channels.CallSID)
+	// Send the audio to the channel FOR the sendAudioResponses goroutine to handle
+	log.Info("Sending audio response to channel for call %s", channels.CallSID)
 	select {
 	case channels.ResponseAudioChan <- audioData:
 		log.Debug("Audio response sent to channel for call %s", channels.CallSID)
@@ -502,41 +515,34 @@ func processTranscription(
 }
 
 // Send audio responses back to the client
-func sendAudioResponses(conn *websocket.Conn, channels *services.ChannelData, streamSID string, streamMutex *sync.Mutex, log *logger.Logger) {
+// Accept pointer to streamSID
+func sendAudioResponses(conn *websocket.Conn, channels *services.ChannelData, streamSID *string, streamMutex *sync.Mutex, log *logger.Logger) {
 	log.Info("Audio response sender started for call %s", channels.CallSID)
 
 	// Maximum chunk size to avoid large packets - keep under 16KB
 	const maxChunkSize = 3200 // 400ms of 8kHz audio (μ-law is 8000 samples/sec at 8-bit)
 
-	// Create a sequence number for media messages
-	var sequenceNumber int64 = 1
-
 	// Send media message in Twilio format
 	sendMediaMessage := func(data []byte) error {
 		// Get the current streamSID (could have been updated)
 		streamMutex.Lock()
-		currentStreamSID := streamSID
+		// Read the shared streamSID via the pointer
+		currentMediaStreamSID := *streamSID
 		streamMutex.Unlock()
 
 		// Get payload details
-		seqNumStr := strconv.FormatInt(sequenceNumber, 10)
-		timestampStr := strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10)
 		encodedData := base64.StdEncoding.EncodeToString(data)
 
-		log.Info("Preparing to send audio chunk with sequence %s", seqNumStr)
+		log.Info("Preparing to send audio chunk")
 
-		// Construct media message according to Twilio docs
-		// https://www.twilio.com/docs/voice/twiml/stream
-		mediaMsg := map[string]interface{}{
-			"event":          "media",
-			"streamSid":      currentStreamSID,
-			"sequenceNumber": seqNumStr,
+		// Construct media message according to Twilio docs for OUTBOUND playback
+		// https://www.twilio.com/docs/voice/twiml/stream#message-media-playback
+		mediaMsg := map[string]interface{}{ // Use interface{} to allow nested map
+			"event":     "media",
+			"streamSid": currentMediaStreamSID, // Use locally read SID
 			"media": map[string]string{
 				"payload": encodedData,
-				// This is critically important: tracks from your server to Twilio must be "outbound" in Twilio's terms
-				"track":     "outbound",
-				"chunk":     "1",
-				"timestamp": timestampStr,
+				// DO NOT include track, chunk, or timestamp for outbound playback messages
 			},
 		}
 
@@ -547,10 +553,8 @@ func sendAudioResponses(conn *websocket.Conn, channels *services.ChannelData, st
 			return err
 		}
 
-		sequenceNumber++
-
 		// Send the message
-		log.Info("Sending audio chunk of %d bytes with sequence %s", len(data), seqNumStr)
+		log.Info("Sending audio chunk of %d bytes", len(data))
 		return conn.WriteMessage(websocket.TextMessage, jsonBytes)
 	}
 
