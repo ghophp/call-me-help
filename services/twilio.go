@@ -42,10 +42,8 @@ func (t *TwilioService) GenerateTwiML(callbackURL string) string {
 	twiml := `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="` + callbackURL + `" mediaFormat="audio/x-mulaw;rate=8000" />
+    <Stream url="` + callbackURL + `" />
   </Connect>
-  <Say>Welcome to the therapy hotline.</Say>
-  <Pause length="600"/>
 </Response>`
 
 	t.log.Info("Generated TwiML response with bidirectional streaming")
